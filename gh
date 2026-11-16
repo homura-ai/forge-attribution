@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""gh wrapper: when an agent runs gh, prefix every body it posts with the
+model-attribution note.
+
+    > [!NOTE]
+    > 🤖 **<model> responding on behalf of @01-1**
+
+Covers pr/issue comment, create, edit, review; release create/edit; and
+`gh api` writes that carry a `body` field (or a JSON --input with "body").
+Humans (no agent environment) and bodies that already carry the note pass
+through untouched. GH_ATTRIBUTION=0 turns it off for one command.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+REAL_GH = os.environ.get("GH_ATTRIBUTION_REAL_GH", "/usr/bin/gh")
+OWNER = os.environ.get("GH_ATTRIBUTION_OWNER", "@01-1")
+T3 = os.environ.get("T3CODE_CLI_PATH", "/home/vi/.t3/bin/t3")
+MARK = "responding on behalf of"
+
+# (group, subcommand) -> (body flags, body-file flags)
+TEXT_CMDS = {
+    ("pr", "comment"): (("-b", "--body"), ("-F", "--body-file")),
+    ("pr", "create"): (("-b", "--body"), ("-F", "--body-file")),
+    ("pr", "edit"): (("-b", "--body"), ("--body-file",)),
+    ("pr", "review"): (("-b", "--body"), ("-F", "--body-file")),
+    ("issue", "comment"): (("-b", "--body"), ("-F", "--body-file")),
+    ("issue", "create"): (("-b", "--body"), ("-F", "--body-file")),
+    ("issue", "edit"): (("-b", "--body"), ("--body-file",)),
+    ("release", "create"): (("-n", "--notes"), ("-F", "--notes-file")),
+    ("release", "edit"): (("-n", "--notes"), ("-F", "--notes-file")),
+}
+# gh global flags that take a value and may appear before the subcommand
+VALUE_GLOBALS = {"-R", "--repo", "--hostname"}
+API_VALUE_FLAGS = {"-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field",
+                   "--input", "-q", "--jq", "-t", "--template", "--hostname", "-p", "--preview", "--cache"}
+API_ENDPOINT = re.compile(r"(^|/)(comments|reviews|issues|pulls|releases|graphql)(/|$|\?)")
+
+
+def is_agent():
+    if os.environ.get("GH_ATTRIBUTION", "1") == "0":
+        return False
+    if os.environ.get("GH_ATTRIBUTION") == "1" and os.environ.get("GH_ATTRIBUTION_MODEL"):
+        return True
+    return any(os.environ.get(k) for k in ("T3CODE_THREAD_ID", "CLAUDECODE", "CODEX_THREAD_ID", "CODEX_SANDBOX", "AI_AGENT"))
+
+
+def pretty(model):
+    m = re.fullmatch(r"claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?", model)
+    if m:
+        ver = m.group(2) + ("." + m.group(3) if m.group(3) else "")
+        return f"Claude {m.group(1).capitalize()} {ver}"
+    m = re.fullmatch(r"gpt-([\d.]+)(?:-([a-z]+))?", model)
+    if m:
+        return f"GPT-{m.group(1)}" + (f" {m.group(2).capitalize()}" if m.group(2) else "")
+    return model
+
+
+def model_name():
+    if os.environ.get("GH_ATTRIBUTION_MODEL"):
+        return os.environ["GH_ATTRIBUTION_MODEL"]
+    tid = os.environ.get("T3CODE_THREAD_ID")
+    if tid:
+        try:
+            out = subprocess.run([T3, "thread", "show", tid, "--messages", "0", "--json"],
+                                 capture_output=True, text=True, timeout=20).stdout
+            model = (json.loads(out).get("thread") or {}).get("model")
+            if model:
+                return pretty(model)
+        except Exception:
+            pass
+    if os.environ.get("CLAUDECODE"):
+        return "Claude Code"
+    if any(k.startswith("CODEX_") for k in os.environ):
+        return "Codex"
+    return "An AI agent"
+
+
+_note = None
+
+
+def attribute(body):
+    global _note
+    if not body.strip() or MARK in body:
+        return body
+    if _note is None:
+        _note = f"> [!NOTE]\n> 🤖 **{model_name()} {MARK} {OWNER}**\n\n"
+    return _note + body
+
+
+def attribute_json(data):
+    """Attribute data["body"] and each inline review comment; True if changed."""
+    changed = False
+    items = [data] + [c for c in data.get("comments") or [] if isinstance(c, dict)]
+    for d in items:
+        if isinstance(d.get("body"), str):
+            new = attribute(d["body"])
+            changed |= new != d["body"]
+            d["body"] = new
+    return changed
+
+
+GQL_BODY = re.compile(r'(\bbody\s*:\s*")((?:[^"\\]|\\.)*)(")')
+
+
+def attribute_graphql(query):
+    def sub(m):
+        text = json.loads('"' + m.group(2) + '"')
+        new = attribute(text)
+        if new == text:
+            return m.group(0)
+        return m.group(1) + json.dumps(new, ensure_ascii=False)[1:-1] + m.group(3)
+    return GQL_BODY.sub(sub, query)
+
+
+def read_file(path):
+    if path == "-":
+        return sys.stdin.read()
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def split_flag(arg):
+    """'--body=x' -> ('--body', 'x'); '-bx' -> ('-b', 'x'); else (arg, None)."""
+    if arg.startswith("--") and "=" in arg:
+        k, v = arg.split("=", 1)
+        return k, v
+    if re.fullmatch(r"-[A-Za-z].+", arg) and not arg.startswith("--"):
+        return arg[:2], arg[2:]
+    return arg, None
+
+
+def find_command(args):
+    """Index of the first two positionals (group, sub), skipping global flags."""
+    pos, i = [], 0
+    while i < len(args) and len(pos) < 2:
+        a = args[i]
+        if a == "--":
+            break
+        if a.startswith("-"):
+            k, v = split_flag(a)
+            if k in VALUE_GLOBALS and v is None:
+                i += 1
+        else:
+            pos.append(i)
+        i += 1
+    return pos
+
+
+def rewrite_text_cmd(args, start, body_flags, file_flags):
+    out, i, changed = list(args[:start]), start, False
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            out.extend(args[i:])
+            break
+        k, v = split_flag(a)
+        if k in body_flags or k in file_flags:
+            if v is None and i + 1 < len(args):
+                v = args[i + 1]
+                i += 1
+            if v is not None:
+                text = read_file(v) if k in file_flags else v
+                new = attribute(text)
+                changed |= new != text
+                out += [body_flags[-1], new]
+                i += 1
+                continue
+        out.append(a)
+        i += 1
+    return out, changed
+
+
+def rewrite_api(args, start):
+    endpoint, j = "", start
+    while j < len(args):
+        k, v = split_flag(args[j])
+        if not args[j].startswith("-"):
+            endpoint = args[j]
+            break
+        if k in API_VALUE_FLAGS and v is None:
+            j += 1
+        j += 1
+    if not API_ENDPOINT.search(endpoint):
+        return args, False, None
+    out, i, changed, tmp = list(args[:start]), start, False, None
+    while i < len(args):
+        a = args[i]
+        k, v = split_flag(a)
+        if k in ("-f", "--raw-field", "-F", "--field", "--input"):
+            if v is None and i + 1 < len(args):
+                v = args[i + 1]
+                i += 1
+            if v is None:
+                out.append(a)
+                i += 1
+                continue
+            if k == "--input":
+                raw = read_file(v)
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    data = None
+                if isinstance(data, dict) and attribute_json(data):
+                    raw, changed = json.dumps(data, ensure_ascii=False), True
+                if changed or v == "-":  # stdin is consumed either way; pass it on via a file
+                    tmp = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False,
+                                                      dir=os.environ.get("XDG_RUNTIME_DIR"))
+                    tmp.write(raw)
+                    tmp.close()
+                    v = tmp.name
+                out += [k, v]
+            else:
+                name, sep, val = v.partition("=")
+                if sep and name == "query" and "mutation" in val:
+                    new = attribute_graphql(val)
+                    changed |= new != val
+                    out += [k, f"query={new}"]
+                elif sep and name in ("body", "notes"):
+                    text = read_file(val[1:]) if k in ("-F", "--field") and val.startswith("@") else val
+                    new = attribute(text)
+                    changed |= new != text
+                    out += ["-f", f"{name}={new}"]
+                else:
+                    out += [k, v]
+            i += 1
+            continue
+        out.append(a)
+        i += 1
+    return out, changed, tmp
+
+
+def main():
+    args = sys.argv[1:]
+    tmp = None
+    if is_agent():
+        try:
+            pos = find_command(args)
+            if pos:
+                group = args[pos[0]]
+                sub = args[pos[1]] if len(pos) > 1 else None
+                if group == "api":
+                    args, _, tmp = rewrite_api(args, pos[0] + 1)
+                elif (group, sub) in TEXT_CMDS:
+                    args, _ = rewrite_text_cmd(args, pos[1] + 1, *TEXT_CMDS[(group, sub)])
+        except Exception as e:  # never block a post because of the wrapper
+            print(f"gh attribution wrapper: {e}; posting unchanged", file=sys.stderr)
+            args = sys.argv[1:]
+    if os.environ.get("GH_ATTRIBUTION_DRYRUN"):
+        if tmp:
+            args = [a if a != tmp.name else "@" + open(a).read() for a in args]
+            os.unlink(tmp.name)
+        print(json.dumps([REAL_GH] + args, ensure_ascii=False))
+        return 0
+    if tmp is None:
+        os.execv(REAL_GH, [REAL_GH] + args)
+    rc = subprocess.call([REAL_GH] + args)
+    os.unlink(tmp.name)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

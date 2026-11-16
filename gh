@@ -21,6 +21,7 @@ REAL_GH = os.environ.get("GH_ATTRIBUTION_REAL_GH", "/usr/bin/gh")
 OWNER = os.environ.get("GH_ATTRIBUTION_OWNER", "@01-1")
 T3 = os.environ.get("T3CODE_CLI_PATH", "/home/vi/.t3/bin/t3")
 MARK = "responding on behalf of"
+NOTED = re.compile(r"🤖 \*\*[^*\n]+ " + MARK)
 
 # (group, subcommand) -> (body flags, body-file flags)
 TEXT_CMDS = {
@@ -85,7 +86,7 @@ _note = None
 
 def attribute(body):
     global _note
-    if not body.strip() or MARK in body:
+    if not body.strip() or NOTED.search(body):
         return body
     if _note is None:
         _note = f"> [!NOTE]\n> 🤖 **{model_name()} {MARK} {OWNER}**\n\n"
@@ -95,6 +96,10 @@ def attribute(body):
 def attribute_json(data):
     """Attribute data["body"] and each inline review comment; True if changed."""
     changed = False
+    if isinstance(data.get("query"), str) and "mutation" in data["query"]:
+        new = attribute_graphql(data["query"])
+        changed |= new != data["query"]
+        data["query"] = new
     items = [data] + [c for c in data.get("comments") or [] if isinstance(c, dict)]
     for d in items:
         if isinstance(d.get("body"), str):
@@ -117,9 +122,15 @@ def attribute_graphql(query):
     return GQL_BODY.sub(sub, query)
 
 
+_stdin = None
+
+
 def read_file(path):
+    global _stdin
     if path == "-":
-        return sys.stdin.read()
+        if _stdin is None:
+            _stdin = sys.stdin.read()
+        return _stdin
     with open(path, encoding="utf-8") as f:
         return f.read()
 
@@ -130,7 +141,8 @@ def split_flag(arg):
         k, v = arg.split("=", 1)
         return k, v
     if re.fullmatch(r"-[A-Za-z].+", arg) and not arg.startswith("--"):
-        return arg[:2], arg[2:]
+        v = arg[2:]
+        return arg[:2], v[1:] if v.startswith("=") else v
     return arg, None
 
 
@@ -250,6 +262,9 @@ def main():
         except Exception as e:  # never block a post because of the wrapper
             print(f"gh attribution wrapper: {e}; posting unchanged", file=sys.stderr)
             args = sys.argv[1:]
+            tmp = None
+            if _stdin is not None:  # stdin was consumed; replay it
+                return subprocess.run([REAL_GH] + args, input=_stdin, text=True).returncode
     if os.environ.get("GH_ATTRIBUTION_DRYRUN"):
         if tmp:
             args = [a if a != tmp.name else "@" + open(a).read() for a in args]

@@ -263,7 +263,7 @@ def main():
             print(f"gh attribution wrapper: {e}; posting unchanged", file=sys.stderr)
             args = sys.argv[1:]
             tmp = None
-            if _stdin is not None:  # stdin was consumed; replay it
+            if _stdin is not None and not os.environ.get("GH_ATTRIBUTION_DRYRUN"):  # stdin was consumed; replay it
                 return subprocess.run([REAL_GH] + args, input=_stdin, text=True).returncode
     if os.environ.get("GH_ATTRIBUTION_DRYRUN"):
         if tmp:

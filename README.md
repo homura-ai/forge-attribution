@@ -1,6 +1,7 @@
 # forge-attribution
 
-`gh` wrapper that prefixes every body an agent posts on GitHub with
+Backstop `gh` wrapper: agents add the note themselves; this adds it to any
+agent-posted GitHub body that lacks
 Homura's model-attribution note:
 
     > [!NOTE]

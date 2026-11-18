@@ -19,7 +19,7 @@ import tempfile
 
 REAL_GH = os.environ.get("GH_ATTRIBUTION_REAL_GH", "/usr/bin/gh")
 OWNER = os.environ.get("GH_ATTRIBUTION_OWNER", "@01-1")
-T3 = os.environ.get("T3CODE_CLI_PATH", "/home/vi/.t3/bin/t3")
+T3 = os.environ.get("T3CODE_CLI_PATH", os.path.expanduser("~/.t3/bin/t3"))
 MARK = "responding on behalf of"
 NOTED = re.compile(r"🤖 \*\*[^*\n]+ " + MARK)
 

@@ -7,8 +7,9 @@ GitHub body without one.
     > 🤖 **<model> responding on behalf of @01-1**
 
 Install with `mkdir -p ~/.local/bin && install -m 755 gh ~/.local/bin/gh`.
-Put `~/.local/bin` ahead of the underlying `gh` on `PATH`. To uninstall,
-run `rm ~/.local/bin/gh`.
+Put `~/.local/bin` on `PATH` before other directories that provide `gh`. The
+wrapper executes `/usr/bin/gh` by default. Set `GH_ATTRIBUTION_REAL_GH` to
+use another path. To uninstall, run `rm ~/.local/bin/gh`.
 
 - Active in agent environments (`T3CODE_THREAD_ID`, `CLAUDECODE`,
   `CODEX_THREAD_ID`, `CODEX_SANDBOX`, `AI_AGENT`). Set `GH_ATTRIBUTION_MODEL`

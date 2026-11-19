@@ -1,23 +1,25 @@
 # forge-attribution
 
-The `gh` wrapper adds Homura's model-attribution note to agent-posted GitHub
-bodies that need it.
+The `gh` wrapper adds this model-attribution note when an agent posts a
+GitHub body without one.
 
     > [!NOTE]
     > 🤖 **<model> responding on behalf of @01-1**
 
 Install with `mkdir -p ~/.local/bin && install -m 755 gh ~/.local/bin/gh`.
-Put `~/.local/bin` ahead of the underlying `gh` on `PATH`. To uninstall,
-run `rm ~/.local/bin/gh`.
+Put `~/.local/bin` on `PATH` before other directories that provide `gh`. The
+wrapper executes `/usr/bin/gh` by default. Set `GH_ATTRIBUTION_REAL_GH` to
+use another path. To uninstall, run `rm ~/.local/bin/gh`.
 
-- Active only in agent environments (`T3CODE_THREAD_ID`, `CLAUDECODE`,
-  `CODEX_THREAD_ID`, `CODEX_SANDBOX`, `AI_AGENT`). You can also force attribution
-  with `GH_ATTRIBUTION=1` and `GH_ATTRIBUTION_MODEL`. Set `T3CODE_CLI_PATH` to your `t3`
-  executable if automatic model lookup cannot find it; `GH_ATTRIBUTION_REAL_GH`
-  overrides the underlying `gh` executable (default `/usr/bin/gh`).
+- Active in agent environments (`T3CODE_THREAD_ID`, `CLAUDECODE`,
+  `CODEX_THREAD_ID`, `CODEX_SANDBOX`, `AI_AGENT`). Set `GH_ATTRIBUTION_MODEL`
+  to override the detected model. Set both `GH_ATTRIBUTION=1` and
+  `GH_ATTRIBUTION_MODEL` to enable attribution outside an agent environment.
+  The wrapper uses `~/.t3/bin/t3` to look up T3 thread models unless you set
+  `T3CODE_CLI_PATH`.
 - Covers `pr|issue comment/create/edit/review`, `release create/edit`, and
   `gh api` writes to comments/reviews/issues/pulls/releases/graphql
   (`-f/-F body=`, `--input` JSON incl. inline review comments, GraphQL
   mutation `body:"..."`).
-- Skips bodies that already contain the note. `GH_ATTRIBUTION=0` disables it
+- `GH_ATTRIBUTION=0` disables attribution
   for one command; `GH_ATTRIBUTION_DRYRUN=1` prints the rewritten argv.
